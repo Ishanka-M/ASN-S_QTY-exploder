@@ -371,30 +371,48 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
     )
     out_buf = io.BytesIO()
     wb.save(out_buf)
-    out_buf.seek(0)
-    st.success(f"✅ සාර්ථකයි · {n_src} rows → {n_out} rows ({target_sheet})")
 
     base = uploaded.name.rsplit(".", 1)[0]
-    d1, d2 = st.columns(2)
-    with d1:
-        st.download_button("⬇️ Exploded Excel", data=out_buf, file_name=f"{base}_EXPLODED.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+
+    pdf_bytes, ngrp, pdf_err = None, 0, None
     if make_pdf:
         try:
             pdf_bytes, ngrp = make_summary_pdf(ws_target, sum_cols)
-            with d2:
-                st.download_button(f"⬇️ Summary PDF ({ngrp} items)", data=pdf_bytes,
-                                   file_name=f"{base}_SUMMARY.pdf", mime="application/pdf",
-                                   use_container_width=True)
         except Exception as e:
-            with d2:
-                st.error(f"PDF error: {e}")
+            pdf_err = str(e)
 
-    st.caption("Output preview (මුල් rows 15)")
     headers = [ws_target.cell(row=1, column=c).value for c in range(1, ws_target.max_column + 1)]
     preview = []
     for r in range(2, min(ws_target.max_row, 16) + 1):
         preview.append([ws_target.cell(row=r, column=c).value for c in range(1, ws_target.max_column + 1)])
-    st.dataframe({(hh or f"col{i}"): [row[i] for row in preview] for i, hh in enumerate(headers)},
+
+    # download buttons click එකකින් rerun වුණත් නැති නොවෙන්න session_state එකේ තියාගන්නවා
+    st.session_state["result"] = {
+        "base": base, "n_src": n_src, "n_out": n_out, "sheet": target_sheet,
+        "excel": out_buf.getvalue(), "pdf": pdf_bytes, "ngrp": ngrp, "pdf_err": pdf_err,
+        "headers": headers, "preview": preview,
+    }
+
+# ---- results (session_state එකෙන් — rerun වුණත් download buttons නැති වෙන්නේ නෑ) ----
+res = st.session_state.get("result")
+if res:
+    st.success(f"✅ සාර්ථකයි · {res['n_src']} rows → {res['n_out']} rows ({res['sheet']})")
+
+    d1, d2 = st.columns(2)
+    with d1:
+        st.download_button("⬇️ Exploded Excel", data=res["excel"],
+                           file_name=f"{res['base']}_EXPLODED.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True, key="dl_excel")
+    with d2:
+        if res["pdf"] is not None:
+            st.download_button(f"⬇️ Summary PDF ({res['ngrp']} items)", data=res["pdf"],
+                               file_name=f"{res['base']}_SUMMARY.pdf", mime="application/pdf",
+                               use_container_width=True, key="dl_pdf")
+        elif res["pdf_err"]:
+            st.error(f"PDF error: {res['pdf_err']}")
+
+    st.caption("Output preview (මුල් rows 15)")
+    st.dataframe({(hh or f"col{i}"): [row[i] for row in res["preview"]]
+                  for i, hh in enumerate(res["headers"])},
                  use_container_width=True, height=360)
