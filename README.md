@@ -22,6 +22,14 @@ streamlit run streamlit_app.py
 1. මේ folder එක GitHub repo එකකට push කරන්න (streamlit_app.py + requirements.txt අනිවාර්යයි).
 2. https://share.streamlit.io → New app → repo එක select → main file: `streamlit_app.py` → Deploy.
 
+## Summary PDF (අලුත්)
+Exploded data එකෙන් **summary PDF** එකක් හැදෙනවා:
+- **CLIENT_CODE + QR Code**
+- **DISPLAY_ASN_NUMBER + QR Code**
+- Item-wise totals table: DISPLAY_ITEM_NUMBER, LOT_NUMBER, QUANTITY (Total), UOM, S_QTY (Total), S_UOM, PACKAGE_TYPE (Total), GROSS_WEIGHT (Total), NET_WEIGHT (Total)
+
+Totals ගණනය වෙන්නේ explode වුණාට පස්සේ data එකෙන් — ඒ නිසා S_QTY (Total) = ඒ item එකේ මුළු carton/line ගාන. (numeric columns sum, text columns value පෙන්නනවා, value නැති numeric columns `-`.)
+
 ## HU_ID generate (අලුත්)
 `HU_ID` column එක හදන විදි 4ක්:
 - **Keep original** — තියෙන HU_ID එකම තියනවා

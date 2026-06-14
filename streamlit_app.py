@@ -4,22 +4,34 @@ ASN S_QTY Exploder
 S_QTY column එකේ අගයෙන් line ගාන හදනවා. S_QTY = 10 නම් line 10ක්,
 හැම line එකකම S_QTY = 1. අනිත් හැම column එකකම details එහෙමම තියෙනවා.
 
-HU_ID generate කරන්න පුළුවන්:
-  - Keep original  : තියෙන HU_ID එකම තියනවා
-  - None           : HU_ID හිස්ව (blank)
-  - Letters+Number : <Letters> + number (1,2,3.. line ගානට)
-  - Item+Number    : <DISPLAY_ITEM_NUMBER> + number (1,2,3.. line ගානට)
+Outputs:
+  1) Exploded Excel (.xlsx)
+  2) Summary PDF  — CLIENT_CODE + QR, DISPLAY_ASN_NUMBER + QR,
+     සහ item-wise totals table
 
-GENERAL Format (ASN Master + ASN DETAIL) සහ
-ATTRIBUTE EXTENTD format (Physical ASN) දෙකම support කරනවා.
+HU_ID generate: Keep original / None / Letters+Number / DISPLAY_ITEM_NUMBER+Number
+Sheet name එක මොකක් වුණත් S_QTY column එකෙන් sheet එක auto-detect වෙනවා.
 """
 
 import io
 import copy
+from collections import OrderedDict
+
 import streamlit as st
 from openpyxl import load_workbook
+import qrcode
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                TableStyle, Image)
 
 st.set_page_config(page_title="ASN S_QTY Exploder", page_icon="📦", layout="wide")
+
+SUMMARY_FIELDS = ["CLIENT_CODE", "DISPLAY_ASN_NUMBER", "DISPLAY_ITEM_NUMBER",
+                  "LOT_NUMBER", "QUANTITY", "UOM", "S_QTY", "S_UOM",
+                  "PACKAGE_TYPE", "GROSS_WEIGHT", "NET_WEIGHT"]
 
 # ---------- helpers ----------
 
@@ -47,6 +59,13 @@ def to_int_qty(val):
     except (ValueError, TypeError):
         return 1
     return n if n >= 1 else 1
+
+
+def to_num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def build_hu(prefix, sep, num, pad):
@@ -104,10 +123,137 @@ def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
     return len(src_rows), len(exploded)
 
 
+# ---------- summary / PDF ----------
+
+def fmt_num(x):
+    if x == int(x):
+        return f"{int(x)}"
+    return f"{x:.3f}".rstrip("0").rstrip(".")
+
+
+def summarize(ws, cols):
+    """Exploded sheet එකෙන් item+lot wise totals + header values."""
+    def first_val(ci):
+        if not ci:
+            return None
+        for r in range(2, ws.max_row + 1):
+            if not is_blank_row(ws, r):
+                return ws.cell(row=r, column=ci).value
+        return None
+
+    client = first_val(cols.get("CLIENT_CODE"))
+    asn = first_val(cols.get("DISPLAY_ASN_NUMBER"))
+
+    groups = OrderedDict()
+    for r in range(2, ws.max_row + 1):
+        if is_blank_row(ws, r):
+            continue
+        item = ws.cell(row=r, column=cols["DISPLAY_ITEM_NUMBER"]).value if cols.get("DISPLAY_ITEM_NUMBER") else None
+        lot = ws.cell(row=r, column=cols["LOT_NUMBER"]).value if cols.get("LOT_NUMBER") else None
+        key = (item, lot)
+        g = groups.setdefault(key, {"sum": {}, "has": {}, "uom": None, "suom": None,
+                                    "pkg_num": 0.0, "pkg_has": False, "pkg_numeric": True, "pkg_txt": set()})
+        for fld in ("QUANTITY", "S_QTY", "GROSS_WEIGHT", "NET_WEIGHT"):
+            if cols.get(fld):
+                x = to_num(ws.cell(row=r, column=cols[fld]).value)
+                if x is not None:
+                    g["sum"][fld] = g["sum"].get(fld, 0.0) + x
+                    g["has"][fld] = True
+        if cols.get("PACKAGE_TYPE"):
+            pv = ws.cell(row=r, column=cols["PACKAGE_TYPE"]).value
+            x = to_num(pv)
+            if x is not None:
+                g["pkg_num"] += x
+                g["pkg_has"] = True
+            elif pv not in (None, ""):
+                g["pkg_numeric"] = False
+                g["pkg_txt"].add(str(pv))
+        if cols.get("UOM") and g["uom"] is None:
+            g["uom"] = ws.cell(row=r, column=cols["UOM"]).value
+        if cols.get("S_UOM") and g["suom"] is None:
+            g["suom"] = ws.cell(row=r, column=cols["S_UOM"]).value
+    return client, asn, groups
+
+
+def qr_flowable(data, size_mm=22):
+    qr = qrcode.QRCode(border=1, box_size=10)
+    qr.add_data(str(data) if data not in (None, "") else "N/A")
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return Image(buf, width=size_mm * mm, height=size_mm * mm)
+
+
+def make_summary_pdf(ws, cols, asn_title="ASN Summary"):
+    client, asn, groups = summarize(ws, cols)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
+                            leftMargin=12 * mm, rightMargin=12 * mm, title=asn_title)
+    styles = getSampleStyleSheet()
+    h = ParagraphStyle("h", parent=styles["Title"], fontSize=16, spaceAfter=6)
+    lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
+    val = ParagraphStyle("val", parent=styles["Normal"], fontSize=13, leading=15)
+
+    story = [Paragraph(asn_title, h), Spacer(1, 4)]
+
+    head = Table([[
+        [Paragraph("CLIENT_CODE", lbl),
+         Paragraph(f"<b>{'' if client is None else client}</b>", val), Spacer(1, 3), qr_flowable(client)],
+        [Paragraph("DISPLAY_ASN_NUMBER", lbl),
+         Paragraph(f"<b>{'' if asn is None else asn}</b>", val), Spacer(1, 3), qr_flowable(asn)],
+    ]], colWidths=[93 * mm, 93 * mm])
+    head.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOX", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    story += [head, Spacer(1, 10)]
+
+    header = ["DISPLAY_ITEM_NUMBER", "LOT_NUMBER", "QUANTITY\n(Total)", "UOM",
+              "S_QTY\n(Total)", "S_UOM", "PACKAGE_TYPE\n(Total)",
+              "GROSS_WEIGHT\n(Total)", "NET_WEIGHT\n(Total)"]
+    rows = [header]
+    for (item, lot), g in groups.items():
+        def cell(fld):
+            return fmt_num(g["sum"][fld]) if g["has"].get(fld) else "-"
+        if g["pkg_numeric"]:
+            pkg = fmt_num(g["pkg_num"]) if g["pkg_has"] else "-"
+        else:
+            pkg = ", ".join(sorted(g["pkg_txt"])) or "-"
+        rows.append([
+            "" if item is None else str(item),
+            "" if lot in (None, "") else str(lot),
+            cell("QUANTITY"), "" if g["uom"] is None else str(g["uom"]),
+            cell("S_QTY"), "" if g["suom"] is None else str(g["suom"]),
+            pkg, cell("GROSS_WEIGHT"), cell("NET_WEIGHT"),
+        ])
+
+    t = Table(rows, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b57")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, 0), 7.5), ("FONTSIZE", (0, 1), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#b8c4cf")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef2f6")]),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.append(t)
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue(), len(groups)
+
+
 # ---------- UI ----------
 
 st.title("📦 ASN S_QTY Exploder")
-st.caption("S_QTY අගයෙන් line ගාන හදනවා · S_QTY 10 → line 10ක් · හැම line එකකම S_QTY = 1 · අනිත් columns details එහෙමම")
+st.caption("S_QTY අගයෙන් line ගාන හදනවා · S_QTY 10 → line 10ක් · හැම line එකකම S_QTY = 1 · Exploded Excel + Summary PDF")
 
 uploaded = st.file_uploader("Excel file එකක් upload කරන්න (.xlsx)", type=["xlsx"])
 if uploaded is None:
@@ -142,12 +288,12 @@ with col2:
 info = sheet_info[target_sheet]
 ws_target = wb[target_sheet]
 
-# sheet name එක මොකක් වුණත් S_QTY column එකෙන් auto-detect වෙනවා
 if len(sqty_sheets) == 1:
     st.caption(f"✓ `S_QTY` column එක හම්බුණේ sheet **{target_sheet}** එකේ (sheet name එක වෙනස් වුණත් auto-detect වෙනවා).")
 else:
     st.caption(f"ℹ️ `S_QTY` column එක තියෙන sheets {len(sqty_sheets)}ක්: {', '.join(sqty_sheets)} — එකක් තෝරන්න.")
 
+# ---- HU_ID ----
 st.subheader("🏷️ HU_ID generate")
 if info["hu"] is None:
     st.warning("මේ sheet එකේ `HU_ID` column එකක් නෑ — HU_ID generate skip වෙනවා.")
@@ -167,7 +313,6 @@ else:
     }
     mode = mode_map[hu_mode_label]
     hu_cfg = {"mode": mode, "letters": "", "sep": "", "start": 1, "pad": 0}
-
     if mode in ("letters", "item"):
         c1, c2, c3, c4 = st.columns(4)
         if mode == "letters":
@@ -185,7 +330,6 @@ else:
         with c4:
             hu_cfg["pad"] = st.number_input("Zero-pad ඉලක්කම් ගාන", value=0, min_value=0, step=1,
                                             help="උදා: 3 නම් 1 → 001. 0 නම් pad නෑ.")
-
         item_example = None
         if mode == "item" and info["item"]:
             item_example = ws_target.cell(row=2, column=info["item"]).value
@@ -195,6 +339,18 @@ else:
             prev.append(build_hu(pfx, hu_cfg["sep"], int(hu_cfg["start"]) + k, hu_cfg["pad"]))
         st.caption("Preview: " + "  ·  ".join(f"`{p}`" for p in prev) + "  · …")
 
+# ---- Summary PDF ----
+st.subheader("📄 Summary PDF")
+make_pdf = st.checkbox("Summary PDF එකකුත් හදන්න", value=True)
+sum_cols = {f: find_col(ws_target, f) for f in SUMMARY_FIELDS}
+if make_pdf:
+    missing = [f for f in SUMMARY_FIELDS if not sum_cols[f]]
+    if missing:
+        st.caption("⚠️ නැති columns (skip වෙනවා): " + ", ".join(missing))
+    else:
+        st.caption("CLIENT_CODE + QR · DISPLAY_ASN_NUMBER + QR · item-wise totals (QUANTITY, S_QTY, weights…)")
+
+# ---- metrics ----
 preview_total = 0
 for r in range(2, ws_target.max_row + 1):
     if is_blank_row(ws_target, r):
@@ -217,14 +373,28 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
     wb.save(out_buf)
     out_buf.seek(0)
     st.success(f"✅ සාර්ථකයි · {n_src} rows → {n_out} rows ({target_sheet})")
+
     base = uploaded.name.rsplit(".", 1)[0]
-    st.download_button("⬇️ Download කරන්න", data=out_buf, file_name=f"{base}_EXPLODED.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                       use_container_width=True)
+    d1, d2 = st.columns(2)
+    with d1:
+        st.download_button("⬇️ Exploded Excel", data=out_buf, file_name=f"{base}_EXPLODED.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
+    if make_pdf:
+        try:
+            pdf_bytes, ngrp = make_summary_pdf(ws_target, sum_cols)
+            with d2:
+                st.download_button(f"⬇️ Summary PDF ({ngrp} items)", data=pdf_bytes,
+                                   file_name=f"{base}_SUMMARY.pdf", mime="application/pdf",
+                                   use_container_width=True)
+        except Exception as e:
+            with d2:
+                st.error(f"PDF error: {e}")
+
     st.caption("Output preview (මුල් rows 15)")
     headers = [ws_target.cell(row=1, column=c).value for c in range(1, ws_target.max_column + 1)]
     preview = []
     for r in range(2, min(ws_target.max_row, 16) + 1):
         preview.append([ws_target.cell(row=r, column=c).value for c in range(1, ws_target.max_column + 1)])
-    st.dataframe({(h or f"col{i}"): [row[i] for row in preview] for i, h in enumerate(headers)},
+    st.dataframe({(hh or f"col{i}"): [row[i] for row in preview] for i, hh in enumerate(headers)},
                  use_container_width=True, height=360)
