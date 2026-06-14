@@ -70,9 +70,12 @@ def to_num(v):
         return None
 
 
-def build_hu(prefix, sep, num, pad):
-    numstr = str(num).zfill(pad) if pad and pad > 0 else str(num)
-    return f"{prefix}{sep}{numstr}"
+def build_hu(prefix, psep, number, sep, counter, pad):
+    """HU_ID = {prefix}{psep}{number}{sep}{counter}. e.g. ACIS-CHEMICAL + - + 260613 + . + 1 -> ACIS-CHEMICAL-260613.1"""
+    cnt = str(counter).zfill(pad) if pad and pad > 0 else str(counter)
+    if number in (None, ""):
+        return f"{prefix}{sep}{cnt}"
+    return f"{prefix}{psep}{number}{sep}{cnt}"
 
 
 def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
@@ -109,7 +112,12 @@ def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
 
     if hu_col is not None and hu_cfg and hu_cfg.get("mode") != "keep":
         mode = hu_cfg["mode"]
-        counter = int(hu_cfg.get("start", 1))
+        start = int(hu_cfg.get("start", 1))
+        number = hu_cfg.get("number", "")
+        psep = hu_cfg.get("psep", "")
+        sep = hu_cfg.get("sep", "")
+        pad = hu_cfg.get("pad", 0)
+        counters = {}  # prefix එකකට වෙන වෙනම counter — item මාරු වුණාම 1 ඉඳන් ආයෙ
         for nv in exploded:
             if mode == "none":
                 nv[hu_col - 1] = None
@@ -119,8 +127,10 @@ def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
                     prefix = "" if pv is None else str(pv)
                 else:
                     prefix = hu_cfg.get("letters", "")
-                nv[hu_col - 1] = build_hu(prefix, hu_cfg.get("sep", ""), counter, hu_cfg.get("pad", 0))
-                counter += 1
+                key = (prefix, number)
+                c = counters.get(key, start)
+                nv[hu_col - 1] = build_hu(prefix, psep, number, sep, c, pad)
+                counters[key] = c + 1
 
     # පරණ data rows එකපාරටම මකනවා (header row 1 රැකෙනවා)
     if ws.max_row >= 2:
@@ -551,31 +561,46 @@ else:
         "DISPLAY_ITEM_NUMBER + Number (1,2,3..)": "item",
     }
     mode = mode_map[hu_mode_label]
-    hu_cfg = {"mode": mode, "letters": "", "sep": "", "start": 1, "pad": 0}
+    hu_cfg = {"mode": mode, "letters": "", "number": "", "psep": "", "sep": "", "start": 1, "pad": 0}
     if mode in ("letters", "item"):
-        c1, c2, c3, c4 = st.columns(4)
         if mode == "letters":
-            with c1:
-                hu_cfg["letters"] = st.text_input("Letters (prefix)", value="HU")
+            r1c1, r1c2, r1c3 = st.columns(3)
+            with r1c1:
+                hu_cfg["letters"] = st.text_input("Letters (prefix)", value="HKEFL")
+            with r1c2:
+                hu_cfg["psep"] = st.text_input("Prefix–Number අතර", value="",
+                                               help="Letters එකයි Number එකයි අතර (උදා: - ). හිස් නම් join වෙනවා.")
+            with r1c3:
+                hu_cfg["number"] = st.text_input("Number (fixed)", value="260613")
         else:
-            with c1:
+            r1c1, r1c2, r1c3 = st.columns(3)
+            with r1c1:
                 st.text_input("Prefix", value="DISPLAY_ITEM_NUMBER", disabled=True,
                               help="හැම row එකකම DISPLAY_ITEM_NUMBER value එක prefix විදිහට යනවා")
-        with c2:
-            hu_cfg["start"] = st.number_input("Number පටන් ගන්න", value=1, step=1,
-                                              help="මේකෙන් පටන් අරන් 1,2,3.. විදිහට line ගානට වැඩි වෙනවා")
-        with c3:
-            hu_cfg["sep"] = st.text_input("Separator (optional)", value="")
-        with c4:
-            hu_cfg["pad"] = st.number_input("Zero-pad ඉලක්කම් ගාන", value=0, min_value=0, step=1,
-                                            help="උදා: 3 නම් 1 → 001. 0 නම් pad නෑ.")
+            with r1c2:
+                hu_cfg["psep"] = st.text_input("Prefix–Number අතර", value="-",
+                                               help="Item එකයි Number එකයි අතර (උදා: - ).")
+            with r1c3:
+                hu_cfg["number"] = st.text_input("Number (fixed)", value="260613")
+
+        r2c1, r2c2, r2c3 = st.columns(3)
+        with r2c1:
+            hu_cfg["sep"] = st.text_input("Number–Line අතර", value=".",
+                                          help="Number එකයි line අංකයයි අතර (උදා: . )")
+        with r2c2:
+            hu_cfg["start"] = st.number_input("Line අංකය පටන් (1,2,3..)", value=1, step=1)
+        with r2c3:
+            hu_cfg["pad"] = st.number_input("Zero-pad", value=0, min_value=0, step=1,
+                                            help="line අංකයට. උදා: 2 නම් 1 → 01. 0 නම් pad නෑ.")
+
         item_example = None
         if mode == "item" and info["item"]:
             item_example = ws_target.cell(row=2, column=info["item"]).value
         prev = []
         for k in range(3):
             pfx = hu_cfg["letters"] if mode == "letters" else ("" if item_example is None else str(item_example))
-            prev.append(build_hu(pfx, hu_cfg["sep"], int(hu_cfg["start"]) + k, hu_cfg["pad"]))
+            prev.append(build_hu(pfx, hu_cfg["psep"], hu_cfg["number"], hu_cfg["sep"],
+                                 int(hu_cfg["start"]) + k, hu_cfg["pad"]))
         st.caption("Preview: " + "  ·  ".join(f"`{p}`" for p in prev) + "  · …")
 
 # ---- Summary PDF ----
