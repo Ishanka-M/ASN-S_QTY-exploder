@@ -589,22 +589,12 @@ if make_pdf:
     else:
         st.caption("CLIENT_CODE + QR · DISPLAY_ASN_NUMBER + QR · item-wise totals (QUANTITY, S_QTY, weights…)")
 
-# ---- HU_ID Labels (barcode + QR) ----
+# ---- HU_ID Labels (barcode + QR) — generate වෙන්නේ results වලට පස්සේ, ඕනේ නම් විතරක් ----
 st.subheader("🏷️ HU_ID Labels (barcode + QR)")
-make_labels = st.checkbox("හැම HU_ID එකකටම barcode + QR label PDF එකක් හදන්න", value=False)
-label_cfg = {"on": make_labels, "per_row": 2, "limit": 500}
-if make_labels:
-    if info["hu"] is None:
-        st.warning("මේ sheet එකේ `HU_ID` column එකක් නෑ — labels හදන්න බෑ.")
-        label_cfg["on"] = False
-    else:
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            label_cfg["per_row"] = st.selectbox("Label එකක පේළියකට ගාන", options=[2, 3], index=0)
-        with lc2:
-            label_cfg["limit"] = st.number_input("උපරිම labels ගාන (speed)", value=500, min_value=1, step=100,
-                                                  help="ලොකු ගානකට (>1000) PDF එක හදන්න තත්පර කීපයක් යනවා.")
-        st.caption("හැම label එකකම: HU_ID · Code128 barcode · QR code · details (Item, ASN, Lot, Qty…)")
+if info["hu"] is None:
+    st.caption("මේ sheet එකේ `HU_ID` column එකක් නෑ — labels හදන්න බෑ.")
+else:
+    st.caption("Explode කළාට පස්සේ පහළින් **ඕනේ නම් විතරක්** barcode + QR labels PDF එක හදාගන්න පුළුවන්.")
 
 # ---- metrics ----
 preview_total = 0
@@ -637,15 +627,15 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
         except Exception as e:
             pdf_err = str(e)
 
-    labels_bytes, n_labels, labels_trunc, labels_err = None, 0, False, None
-    if label_cfg["on"] and info["hu"]:
+    # Labels: PDF මෙතනදී හදන්නේ නෑ (speed) — records විතරක් capture කරනවා, generate වෙන්නේ ඕනේ නම් පහළින්
+    hu_records = None
+    if info["hu"]:
         try:
             detail_cols = [(f, find_col(ws_target, f)) for f in LABEL_DETAIL_FIELDS]
-            recs, labels_trunc = build_label_records(ws_target, info["hu"], detail_cols, int(label_cfg["limit"]))
-            n_labels = len(recs)
-            labels_bytes = make_labels_pdf(recs, per_row=label_cfg["per_row"])
-        except Exception as e:
-            labels_err = str(e)
+            hu_records, _ = build_label_records(ws_target, info["hu"], detail_cols, 20000)
+        except Exception:
+            hu_records = None
+    st.session_state.pop("labels_pdf", None)  # පරණ labels clear
 
     headers = [ws_target.cell(row=1, column=c).value for c in range(1, ws_target.max_column + 1)]
     preview = []
@@ -656,7 +646,7 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
     st.session_state["result"] = {
         "base": base, "n_src": n_src, "n_out": n_out, "sheet": target_sheet,
         "excel": out_buf.getvalue(), "pdf": pdf_bytes, "ngrp": ngrp, "n_asn": n_asn, "pdf_err": pdf_err,
-        "labels": labels_bytes, "n_labels": n_labels, "labels_trunc": labels_trunc, "labels_err": labels_err,
+        "hu_records": hu_records,
         "headers": headers, "preview": preview,
     }
 
@@ -665,7 +655,7 @@ res = st.session_state.get("result")
 if res:
     st.success(f"✅ සාර්ථකයි · {res['n_src']} rows → {res['n_out']} rows ({res['sheet']})")
 
-    d1, d2, d3 = st.columns(3)
+    d1, d2 = st.columns(2)
     with d1:
         st.download_button("⬇️ Exploded Excel", data=res["excel"],
                            file_name=f"{res['base']}_EXPLODED.xlsx",
@@ -678,16 +668,38 @@ if res:
                                use_container_width=True, key="dl_pdf")
         elif res["pdf_err"]:
             st.error(f"PDF error: {res['pdf_err']}")
-    with d3:
-        if res.get("labels") is not None:
-            st.download_button(f"⬇️ HU_ID Labels ({res['n_labels']})", data=res["labels"],
+
+    # ---- HU_ID Labels — ඕනේ නම් විතරක් generate + download ----
+    recs_all = res.get("hu_records")
+    if recs_all:
+        st.divider()
+        st.markdown("### 🏷️ HU_ID Labels (barcode + QR)")
+        st.caption("ඕනේ නම් විතරක් — options තෝරලා **Labels PDF හදන්න** click කරන්න.")
+        total = len(recs_all)
+        lc1, lc2, lc3 = st.columns([1, 1, 1.3])
+        with lc1:
+            per_row = st.selectbox("පේළියකට labels", options=[2, 3], index=0, key="lbl_per_row")
+        with lc2:
+            limit = st.number_input("උපරිම labels (speed)", min_value=1, value=min(500, total),
+                                    step=100, key="lbl_limit",
+                                    help="ලොකු ගානකට (>1000) තත්පර කීපයක් යනවා.")
+        with lc3:
+            st.write("")
+            if st.button("🏷️ Labels PDF හදන්න", use_container_width=True, key="gen_labels"):
+                recs = recs_all[:int(limit)]
+                with st.spinner(f"Labels {len(recs)}ක් හදනවා…"):
+                    st.session_state["labels_pdf"] = make_labels_pdf(recs, per_row=per_row)
+                    st.session_state["labels_n"] = len(recs)
+
+        if st.session_state.get("labels_pdf"):
+            ln = st.session_state.get("labels_n", 0)
+            st.download_button(f"⬇️ HU_ID Labels PDF ({ln})", data=st.session_state["labels_pdf"],
                                file_name=f"{res['base']}_LABELS.pdf", mime="application/pdf",
                                use_container_width=True, key="dl_labels")
-        elif res.get("labels_err"):
-            st.error(f"Labels error: {res['labels_err']}")
-    if res.get("labels_trunc"):
-        st.caption(f"ℹ️ Labels {res['n_labels']}කට limit කළා. ඔක්කොම ඕන නම් 'උපරිම labels ගාන' වැඩි කරන්න.")
+            if ln < total:
+                st.caption(f"ℹ️ {total}න් {ln}ක් විතරයි හැදුවේ. ඔක්කොම ඕන නම් 'උපරිම labels' වැඩි කරලා ආයෙ හදන්න.")
 
+    st.divider()
     st.caption("Output preview (මුල් rows 15)")
     st.dataframe({(hh or f"col{i}"): [row[i] for row in res["preview"]]
                   for i, hh in enumerate(res["headers"])},
