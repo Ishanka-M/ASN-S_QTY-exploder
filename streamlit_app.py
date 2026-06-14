@@ -15,6 +15,7 @@ Sheet name එක මොකක් වුණත් S_QTY column එකෙන් s
 
 import io
 import copy
+from functools import lru_cache
 from collections import OrderedDict
 
 import streamlit as st
@@ -26,6 +27,7 @@ from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
                                 TableStyle, Image)
+from reportlab.graphics.barcode import createBarcodeDrawing
 
 st.set_page_config(page_title="ASN S_QTY Exploder", page_icon="📦", layout="wide")
 
@@ -75,32 +77,40 @@ def build_hu(prefix, sep, num, pad):
 
 def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
                   hu_col=None, item_col=None, hu_cfg=None):
+    """
+    Fast explode: iter_rows වලින් කියවලා, data rows delete කරලා, append වලින් ආයෙ ලියනවා.
+    Header row 1 (styling එක්ක) රැකෙනවා. 'General' නොවන number formats ආයෙ apply වෙනවා.
+    """
     max_col = ws.max_column
 
-    src_rows = []
-    for r in range(2, ws.max_row + 1):
-        if is_blank_row(ws, r):
-            continue
-        values = [ws.cell(row=r, column=c).value for c in range(1, max_col + 1)]
-        styles = [copy.copy(ws.cell(row=r, column=c)._style) for c in range(1, max_col + 1)]
-        src_rows.append((values, styles))
+    # 'General' නොවන number formats විතරක් මතක තියාගන්නවා (reapply සඳහා)
+    fmts = {}
+    for c in range(1, max_col + 1):
+        nf = ws.cell(row=2, column=c).number_format
+        if nf and nf != "General":
+            fmts[c] = nf
 
+    # data rows fast read
+    src_rows = [list(r) for r in ws.iter_rows(min_row=2, values_only=True)
+                if any(v not in (None, "") for v in r)]
+
+    # explode
     exploded = []
-    for values, styles in src_rows:
+    for values in src_rows:
         n = to_int_qty(values[sqty_col - 1])
+        base = list(values)
+        base[sqty_col - 1] = 1
         for _ in range(n):
-            nv = list(values)
-            nv[sqty_col - 1] = 1
-            exploded.append((nv, styles))
+            exploded.append(list(base))
 
     if renumber_line and line_col is not None:
-        for i, (nv, _s) in enumerate(exploded, start=1):
+        for i, nv in enumerate(exploded, start=1):
             nv[line_col - 1] = i
 
     if hu_col is not None and hu_cfg and hu_cfg.get("mode") != "keep":
         mode = hu_cfg["mode"]
         counter = int(hu_cfg.get("start", 1))
-        for nv, _s in exploded:
+        for nv in exploded:
             if mode == "none":
                 nv[hu_col - 1] = None
             else:
@@ -112,13 +122,19 @@ def explode_sheet(ws, sqty_col, line_col=None, renumber_line=True,
                 nv[hu_col - 1] = build_hu(prefix, hu_cfg.get("sep", ""), counter, hu_cfg.get("pad", 0))
                 counter += 1
 
+    # පරණ data rows එකපාරටම මකනවා (header row 1 රැකෙනවා)
     if ws.max_row >= 2:
         ws.delete_rows(2, ws.max_row - 1)
 
-    for ridx, (nv, styles) in enumerate(exploded, start=2):
-        for cidx in range(1, max_col + 1):
-            cell = ws.cell(row=ridx, column=cidx, value=nv[cidx - 1])
-            cell._style = copy.copy(styles[cidx - 1])
+    # fast write
+    for nv in exploded:
+        ws.append(nv)
+
+    # number formats reapply (few cols විතරයි → fast)
+    if fmts:
+        for row in ws.iter_rows(min_row=2):
+            for c, nf in fmts.items():
+                row[c - 1].number_format = nf
 
     return len(src_rows), len(exploded)
 
@@ -250,6 +266,96 @@ def make_summary_pdf(ws, cols, asn_title="ASN Summary"):
     return buf.getvalue(), len(groups)
 
 
+# ---------- HU_ID labels (barcode + QR) ----------
+
+LABEL_DETAIL_FIELDS = ["DISPLAY_ITEM_NUMBER", "DISPLAY_ASN_NUMBER", "LOT_NUMBER",
+                       "QUANTITY", "SUPPLIER_DESC"]
+
+
+@lru_cache(maxsize=8192)
+def _qr_png(data):
+    qr = qrcode.QRCode(border=1, box_size=10)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    b = io.BytesIO()
+    img.save(b, format="PNG")
+    return b.getvalue()
+
+
+def _qr_image(data, size_mm=18):
+    return Image(io.BytesIO(_qr_png(str(data) if data not in (None, "") else "N/A")),
+                 width=size_mm * mm, height=size_mm * mm)
+
+
+def _barcode(value, width_mm=58, h_mm=11):
+    return createBarcodeDrawing("Code128", value=str(value) if value not in (None, "") else "N/A",
+                                barHeight=h_mm * mm, width=width_mm * mm, humanReadable=True, fontSize=6)
+
+
+def make_labels_pdf(records, per_row=2):
+    """records: [{'hu':..., 'details':[(label,val),...]}, ...]"""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=8 * mm, bottomMargin=8 * mm,
+                            leftMargin=8 * mm, rightMargin=8 * mm, title="HU_ID Labels")
+    ss = getSampleStyleSheet()
+    big = ParagraphStyle("big", parent=ss["Normal"], fontSize=10, leading=12)
+    det = ParagraphStyle("det", parent=ss["Normal"], fontSize=7.5, leading=9)
+
+    col_w = (190.0 / per_row)
+    qr_mm = 16 if per_row >= 3 else 18
+    bc_mm = col_w - 24
+
+    def cell(rec):
+        left = [Paragraph(f"<b>{rec['hu']}</b>", big)]
+        for k, v in rec["details"]:
+            if v not in (None, ""):
+                left.append(Paragraph(f"<font color='#667'>{k}:</font> {v}", det))
+        top = Table([[left, _qr_image(rec["hu"], qr_mm)]], colWidths=[(col_w - qr_mm - 6) * mm, qr_mm * mm])
+        top.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1)]))
+        inner = Table([[top], [_barcode(rec["hu"], bc_mm)]], colWidths=[col_w * mm])
+        inner.setStyle(TableStyle([("ALIGN", (0, 1), (0, 1), "CENTER"),
+                                   ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                                   ("LEFTPADDING", (0, 0), (-1, -1), 3)]))
+        return inner
+
+    cells = [cell(r) for r in records]
+    rows = []
+    for i in range(0, len(cells), per_row):
+        row = cells[i:i + per_row]
+        while len(row) < per_row:
+            row.append("")
+        rows.append(row)
+    grid = Table(rows, colWidths=[col_w * mm] * per_row)
+    grid.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#aab")),
+                              ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                              ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 6)]))
+    doc.build([grid])
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_label_records(ws, hu_col, detail_cols, limit):
+    """Exploded sheet එකෙන් label records හදනවා (HU_ID + selected details)."""
+    records = []
+    truncated = False
+    for r in range(2, ws.max_row + 1):
+        if is_blank_row(ws, r):
+            continue
+        if len(records) >= limit:
+            truncated = True
+            break
+        hu = ws.cell(row=r, column=hu_col).value if hu_col else None
+        details = []
+        for fld, ci in detail_cols:
+            if ci:
+                details.append((fld, ws.cell(row=r, column=ci).value))
+        records.append({"hu": "" if hu is None else str(hu), "details": details})
+    return records, truncated
+
+
 # ---------- UI ----------
 
 st.title("📦 ASN S_QTY Exploder")
@@ -350,6 +456,23 @@ if make_pdf:
     else:
         st.caption("CLIENT_CODE + QR · DISPLAY_ASN_NUMBER + QR · item-wise totals (QUANTITY, S_QTY, weights…)")
 
+# ---- HU_ID Labels (barcode + QR) ----
+st.subheader("🏷️ HU_ID Labels (barcode + QR)")
+make_labels = st.checkbox("හැම HU_ID එකකටම barcode + QR label PDF එකක් හදන්න", value=False)
+label_cfg = {"on": make_labels, "per_row": 2, "limit": 500}
+if make_labels:
+    if info["hu"] is None:
+        st.warning("මේ sheet එකේ `HU_ID` column එකක් නෑ — labels හදන්න බෑ.")
+        label_cfg["on"] = False
+    else:
+        lc1, lc2 = st.columns(2)
+        with lc1:
+            label_cfg["per_row"] = st.selectbox("Label එකක පේළියකට ගාන", options=[2, 3], index=0)
+        with lc2:
+            label_cfg["limit"] = st.number_input("උපරිම labels ගාන (speed)", value=500, min_value=1, step=100,
+                                                  help="ලොකු ගානකට (>1000) PDF එක හදන්න තත්පර කීපයක් යනවා.")
+        st.caption("හැම label එකකම: HU_ID · Code128 barcode · QR code · details (Item, ASN, Lot, Qty…)")
+
 # ---- metrics ----
 preview_total = 0
 for r in range(2, ws_target.max_row + 1):
@@ -381,6 +504,16 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
         except Exception as e:
             pdf_err = str(e)
 
+    labels_bytes, n_labels, labels_trunc, labels_err = None, 0, False, None
+    if label_cfg["on"] and info["hu"]:
+        try:
+            detail_cols = [(f, find_col(ws_target, f)) for f in LABEL_DETAIL_FIELDS]
+            recs, labels_trunc = build_label_records(ws_target, info["hu"], detail_cols, int(label_cfg["limit"]))
+            n_labels = len(recs)
+            labels_bytes = make_labels_pdf(recs, per_row=label_cfg["per_row"])
+        except Exception as e:
+            labels_err = str(e)
+
     headers = [ws_target.cell(row=1, column=c).value for c in range(1, ws_target.max_column + 1)]
     preview = []
     for r in range(2, min(ws_target.max_row, 16) + 1):
@@ -390,6 +523,7 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
     st.session_state["result"] = {
         "base": base, "n_src": n_src, "n_out": n_out, "sheet": target_sheet,
         "excel": out_buf.getvalue(), "pdf": pdf_bytes, "ngrp": ngrp, "pdf_err": pdf_err,
+        "labels": labels_bytes, "n_labels": n_labels, "labels_trunc": labels_trunc, "labels_err": labels_err,
         "headers": headers, "preview": preview,
     }
 
@@ -398,7 +532,7 @@ res = st.session_state.get("result")
 if res:
     st.success(f"✅ සාර්ථකයි · {res['n_src']} rows → {res['n_out']} rows ({res['sheet']})")
 
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     with d1:
         st.download_button("⬇️ Exploded Excel", data=res["excel"],
                            file_name=f"{res['base']}_EXPLODED.xlsx",
@@ -411,6 +545,15 @@ if res:
                                use_container_width=True, key="dl_pdf")
         elif res["pdf_err"]:
             st.error(f"PDF error: {res['pdf_err']}")
+    with d3:
+        if res.get("labels") is not None:
+            st.download_button(f"⬇️ HU_ID Labels ({res['n_labels']})", data=res["labels"],
+                               file_name=f"{res['base']}_LABELS.pdf", mime="application/pdf",
+                               use_container_width=True, key="dl_labels")
+        elif res.get("labels_err"):
+            st.error(f"Labels error: {res['labels_err']}")
+    if res.get("labels_trunc"):
+        st.caption(f"ℹ️ Labels {res['n_labels']}කට limit කළා. ඔක්කොම ඕන නම් 'උපරිම labels ගාන' වැඩි කරන්න.")
 
     st.caption("Output preview (මුල් rows 15)")
     st.dataframe({(hh or f"col{i}"): [row[i] for row in res["preview"]]

@@ -22,6 +22,18 @@ streamlit run streamlit_app.py
 1. මේ folder එක GitHub repo එකකට push කරන්න (streamlit_app.py + requirements.txt අනිවාර්යයි).
 2. https://share.streamlit.io → New app → repo එක select → main file: `streamlit_app.py` → Deploy.
 
+## HU_ID Labels — barcode + QR (අලුත්)
+හැම HU_ID එකකටම (carton/line එකකට) **Code128 barcode + QR code + details** තියෙන label PDF එකක්:
+- HU_ID, DISPLAY_ITEM_NUMBER, DISPLAY_ASN_NUMBER, LOT_NUMBER, QUANTITY, SUPPLIER_DESC
+- පේළියකට labels 2 හරි 3 හරි තෝරගන්න පුළුවන්
+- Speed එකට උපරිම labels ගානක් (default 500) set කරන්න පුළුවන් — ලොකු ගානකට (>1000) තත්පර කීපයක් යනවා
+
+## Multiple users + speed
+- Streamlit එක default එකෙන්ම **session per-user** — multiple users එකවර වැඩ කරනවා (state share වෙන්නේ නෑ).
+- Explode logic එක `iter_rows` + `append` වලින් optimize කරලා (cell-by-cell නෙවෙයි) — 10,000 rows ~1s.
+- QR images `lru_cache` කරලා — එකම value නැවත නැවත හදන්නේ නෑ.
+- සැබෑ heavy concurrent load එකකට Streamlit Cloud resources වැඩි කරගන්න (හෝ dedicated server එකක).
+
 ## Summary PDF (අලුත්)
 Exploded data එකෙන් **summary PDF** එකක් හැදෙනවා:
 - **CLIENT_CODE + QR Code**
