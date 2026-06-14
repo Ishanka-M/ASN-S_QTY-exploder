@@ -456,6 +456,22 @@ button[kind="primary"]:hover{ background:linear-gradient(120deg,#1b3f5c,#27618d)
 /* code-ish captions */
 .stCaption, [data-testid="stCaptionContainer"]{ color:var(--muted)!important; }
 
+/* widget labels + radio/checkbox option text — read වෙන්න dark කරනවා */
+[data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] *,
+.stRadio label, .stRadio label *,
+.stCheckbox label, .stCheckbox label *,
+.stSelectbox label, .stMultiSelect label,
+.stTextInput label, .stNumberInput label,
+[data-baseweb="radio"] *, [data-testid="stRadio"] label, [data-testid="stRadio"] label *,
+[data-testid="stCheckbox"] label, [data-testid="stCheckbox"] label *{
+  color:var(--ink)!important;
+}
+/* selected radio / checkbox tick → navy (off-brand red නැති කරනවා) */
+[data-baseweb="radio"] [aria-checked="true"]>div:first-child{
+  background-color:var(--navy)!important; border-color:var(--navy)!important; }
+[data-baseweb="checkbox"] [aria-checked="true"]{
+  background-color:var(--navy)!important; border-color:var(--navy)!important; }
+
 @media (prefers-reduced-motion: reduce){
   *{ animation:none!important; transition:none!important; }
 }
