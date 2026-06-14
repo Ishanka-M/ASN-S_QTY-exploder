@@ -416,7 +416,7 @@ st.markdown("""
 :root{ --navy:#16324a; --navy-d:#0e2438; --amber:#f5a623; --ink:#1a2733; --muted:#5a6b7b; --line:#e3eaf0; }
 
 html, body, [class*="css"]{ font-family:'Inter',system-ui,sans-serif; }
-.stApp{ background:linear-gradient(180deg,#f7fafc 0%,#eef3f7 100%); }
+.stApp{ background:linear-gradient(180deg,#dde6ef 0%,#c8d5e2 100%); }
 .block-container{ padding-top:1.4rem; animation:fadeUp .5s ease both; }
 
 @keyframes fadeUp{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
