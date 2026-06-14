@@ -34,6 +34,10 @@ streamlit run streamlit_app.py
 - QR images `lru_cache` කරලා — එකම value නැවත නැවත හදන්නේ නෑ.
 - සැබෑ heavy concurrent load එකකට Streamlit Cloud resources වැඩි කරගන්න (හෝ dedicated server එකක).
 
+## Summary PDF — per-ASN pages (update)
+- **Page 1: ASN Overview** — සියලුම DISPLAY_ASN_NUMBER එකට: DISPLAY_ITEM_NUMBER, LOT_NUMBER, QUANTITY (Total), UOM (එකම ASN එකේ rows merge වෙනවා).
+- **ඊට පස්සේ DISPLAY_ASN_NUMBER එකකට වෙන වෙනම page එකක්** — CLIENT_CODE + QR, DISPLAY_ASN_NUMBER + QR, සහ ඒ ASN එකේ item-wise totals (QUANTITY/S_QTY/PACKAGE_TYPE/GROSS/NET).
+
 ## Summary PDF (අලුත්)
 Exploded data එකෙන් **summary PDF** එකක් හැදෙනවා:
 - **CLIENT_CODE + QR Code**
@@ -57,3 +61,8 @@ App එකේ live preview එකකින් generate වෙන HU_ID format �
 3. හැම data row එකක්ම S_QTY පාරක් copy වෙනවා, හැම copy එකකම S_QTY = 1.
 4. `ASN_LINE_NUMBER` 1..N විදිහට renumber (toggle එකෙන් off කරන්න පුළුවන්).
 5. Output `.xlsx` එක download වෙනවා — headers සහ cell styles රැකෙනවා.
+
+## Professional UI + animations
+- Navy + amber theme, codes වලට monospace (JetBrains Mono) accent, Inter body font.
+- Animated hero header (amber sheen), fade-in sections, hover lift buttons/metrics, card-style metrics.
+- `prefers-reduced-motion` respect කරනවා. Theme `.streamlit/config.toml` එකෙන් set වෙනවා.

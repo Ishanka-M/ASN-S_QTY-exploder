@@ -26,7 +26,7 @@ from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
-                                TableStyle, Image)
+                                TableStyle, Image, PageBreak)
 from reportlab.graphics.barcode import createBarcodeDrawing
 
 st.set_page_config(page_title="ASN S_QTY Exploder", page_icon="📦", layout="wide")
@@ -147,28 +147,30 @@ def fmt_num(x):
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
 
+def _blank_agg():
+    return {"sum": {}, "has": {}, "uom": None, "suom": None,
+            "pkg_num": 0.0, "pkg_has": False, "pkg_numeric": True, "pkg_txt": set()}
+
+
 def summarize(ws, cols):
-    """Exploded sheet එකෙන් item+lot wise totals + header values."""
-    def first_val(ci):
-        if not ci:
-            return None
-        for r in range(2, ws.max_row + 1):
-            if not is_blank_row(ws, r):
-                return ws.cell(row=r, column=ci).value
-        return None
-
-    client = first_val(cols.get("CLIENT_CODE"))
-    asn = first_val(cols.get("DISPLAY_ASN_NUMBER"))
-
-    groups = OrderedDict()
+    """
+    Exploded sheet එක DISPLAY_ASN_NUMBER අනුව group කරනවා.
+    Return: OrderedDict[asn] -> {"client": <code>, "groups": OrderedDict[(item,lot)] -> agg}
+    """
+    asns = OrderedDict()
     for r in range(2, ws.max_row + 1):
         if is_blank_row(ws, r):
             continue
+        asn = ws.cell(row=r, column=cols["DISPLAY_ASN_NUMBER"]).value if cols.get("DISPLAY_ASN_NUMBER") else None
+        client = ws.cell(row=r, column=cols["CLIENT_CODE"]).value if cols.get("CLIENT_CODE") else None
         item = ws.cell(row=r, column=cols["DISPLAY_ITEM_NUMBER"]).value if cols.get("DISPLAY_ITEM_NUMBER") else None
         lot = ws.cell(row=r, column=cols["LOT_NUMBER"]).value if cols.get("LOT_NUMBER") else None
-        key = (item, lot)
-        g = groups.setdefault(key, {"sum": {}, "has": {}, "uom": None, "suom": None,
-                                    "pkg_num": 0.0, "pkg_has": False, "pkg_numeric": True, "pkg_txt": set()})
+
+        bucket = asns.setdefault(asn, {"client": client, "groups": OrderedDict()})
+        if bucket["client"] in (None, "") and client not in (None, ""):
+            bucket["client"] = client
+
+        g = bucket["groups"].setdefault((item, lot), _blank_agg())
         for fld in ("QUANTITY", "S_QTY", "GROSS_WEIGHT", "NET_WEIGHT"):
             if cols.get(fld):
                 x = to_num(ws.cell(row=r, column=cols[fld]).value)
@@ -188,82 +190,121 @@ def summarize(ws, cols):
             g["uom"] = ws.cell(row=r, column=cols["UOM"]).value
         if cols.get("S_UOM") and g["suom"] is None:
             g["suom"] = ws.cell(row=r, column=cols["S_UOM"]).value
-    return client, asn, groups
+    return asns
 
 
 def qr_flowable(data, size_mm=22):
-    qr = qrcode.QRCode(border=1, box_size=10)
-    qr.add_data(str(data) if data not in (None, "") else "N/A")
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return Image(buf, width=size_mm * mm, height=size_mm * mm)
+    return Image(io.BytesIO(_qr_png(str(data) if data not in (None, "") else "N/A")),
+                 width=size_mm * mm, height=size_mm * mm)
 
 
-def make_summary_pdf(ws, cols, asn_title="ASN Summary"):
-    client, asn, groups = summarize(ws, cols)
+def _g_cell(g, fld):
+    return fmt_num(g["sum"][fld]) if g["has"].get(fld) else "-"
+
+
+def _pkg_cell(g):
+    if g["pkg_numeric"]:
+        return fmt_num(g["pkg_num"]) if g["pkg_has"] else "-"
+    return ", ".join(sorted(g["pkg_txt"])) or "-"
+
+
+def make_summary_pdf(ws, cols, doc_title="ASN Summary"):
+    asns = summarize(ws, cols)
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=14 * mm, bottomMargin=14 * mm,
-                            leftMargin=12 * mm, rightMargin=12 * mm, title=asn_title)
-    styles = getSampleStyleSheet()
-    h = ParagraphStyle("h", parent=styles["Title"], fontSize=16, spaceAfter=6)
-    lbl = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
-    val = ParagraphStyle("val", parent=styles["Normal"], fontSize=13, leading=15)
+                            leftMargin=12 * mm, rightMargin=12 * mm, title=doc_title)
+    ss = getSampleStyleSheet()
+    h = ParagraphStyle("h", parent=ss["Title"], fontSize=16, spaceAfter=4)
+    sub = ParagraphStyle("sub", parent=ss["Normal"], fontSize=9, textColor=colors.HexColor("#5a6b7b"), spaceAfter=8)
+    lbl = ParagraphStyle("lbl", parent=ss["Normal"], fontSize=9, textColor=colors.grey)
+    val = ParagraphStyle("val", parent=ss["Normal"], fontSize=13, leading=15)
 
-    story = [Paragraph(asn_title, h), Spacer(1, 4)]
+    NAVY = colors.HexColor("#16324a")
+    GRID = colors.HexColor("#b8c4cf")
+    ZEBRA = colors.HexColor("#eef2f6")
 
-    head = Table([[
-        [Paragraph("CLIENT_CODE", lbl),
-         Paragraph(f"<b>{'' if client is None else client}</b>", val), Spacer(1, 3), qr_flowable(client)],
-        [Paragraph("DISPLAY_ASN_NUMBER", lbl),
-         Paragraph(f"<b>{'' if asn is None else asn}</b>", val), Spacer(1, 3), qr_flowable(asn)],
-    ]], colWidths=[93 * mm, 93 * mm])
-    head.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story += [head, Spacer(1, 10)]
+    story = []
 
-    header = ["DISPLAY_ITEM_NUMBER", "LOT_NUMBER", "QUANTITY\n(Total)", "UOM",
-              "S_QTY\n(Total)", "S_UOM", "PACKAGE_TYPE\n(Total)",
-              "GROSS_WEIGHT\n(Total)", "NET_WEIGHT\n(Total)"]
-    rows = [header]
-    for (item, lot), g in groups.items():
-        def cell(fld):
-            return fmt_num(g["sum"][fld]) if g["has"].get(fld) else "-"
-        if g["pkg_numeric"]:
-            pkg = fmt_num(g["pkg_num"]) if g["pkg_has"] else "-"
-        else:
-            pkg = ", ".join(sorted(g["pkg_txt"])) or "-"
-        rows.append([
-            "" if item is None else str(item),
-            "" if lot in (None, "") else str(lot),
-            cell("QUANTITY"), "" if g["uom"] is None else str(g["uom"]),
-            cell("S_QTY"), "" if g["suom"] is None else str(g["suom"]),
-            pkg, cell("GROSS_WEIGHT"), cell("NET_WEIGHT"),
-        ])
-
-    t = Table(rows, repeatRows=1)
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3b57")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, 0), 7.5), ("FONTSIZE", (0, 1), (-1, -1), 8),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#b8c4cf")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef2f6")]),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN", (2, 0), (-1, -1), "RIGHT"), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+    # ---------- Page 1: Overview (සියලුම ASN) ----------
+    story.append(Paragraph("ASN Overview", h))
+    story.append(Paragraph(f"All DISPLAY_ASN_NUMBER &nbsp;·&nbsp; {len(asns)} ASN", sub))
+    ov_header = ["DISPLAY_ASN_NUMBER", "DISPLAY_ITEM_NUMBER", "LOT_NUMBER", "QUANTITY\n(Total)", "UOM"]
+    ov_rows = [ov_header]
+    span_cmds = []
+    ridx = 1
+    for asn, bucket in asns.items():
+        start = ridx
+        for (item, lot), g in bucket["groups"].items():
+            ov_rows.append([
+                "" if asn is None else str(asn),
+                "" if item is None else str(item),
+                "" if lot in (None, "") else str(lot),
+                _g_cell(g, "QUANTITY"),
+                "" if g["uom"] is None else str(g["uom"]),
+            ])
+            ridx += 1
+        if ridx - start > 1:  # එකම ASN එකේ rows කිහිපයක් → ASN cell merge
+            span_cmds.append(("SPAN", (0, start), (0, ridx - 1)))
+    ov = Table(ov_rows, repeatRows=1, colWidths=[42 * mm, 56 * mm, 28 * mm, 32 * mm, 28 * mm])
+    ov.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, 0), 8), ("FONTSIZE", (0, 1), (-1, -1), 8.5),
+        ("GRID", (0, 0), (-1, -1), 0.4, GRID), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (3, 0), (3, -1), "RIGHT"), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, ZEBRA]),
         ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
-    story.append(t)
+    ] + span_cmds))
+    story.append(ov)
+
+    # ---------- ASN එකකට වෙන වෙනම page ----------
+    det_header = ["DISPLAY_ITEM_NUMBER", "LOT_NUMBER", "QUANTITY\n(Total)", "UOM",
+                  "S_QTY\n(Total)", "S_UOM", "PACKAGE_TYPE\n(Total)",
+                  "GROSS_WEIGHT\n(Total)", "NET_WEIGHT\n(Total)"]
+    for asn, bucket in asns.items():
+        story.append(PageBreak())
+        client = bucket["client"]
+        story.append(Paragraph("ASN Summary", h))
+        head = Table([[
+            [Paragraph("CLIENT_CODE", lbl),
+             Paragraph(f"<b>{'' if client is None else client}</b>", val), Spacer(1, 3), qr_flowable(client)],
+            [Paragraph("DISPLAY_ASN_NUMBER", lbl),
+             Paragraph(f"<b>{'' if asn is None else asn}</b>", val), Spacer(1, 3), qr_flowable(asn)],
+        ]], colWidths=[93 * mm, 93 * mm])
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story += [head, Spacer(1, 10)]
+
+        rows = [det_header]
+        for (item, lot), g in bucket["groups"].items():
+            rows.append([
+                "" if item is None else str(item),
+                "" if lot in (None, "") else str(lot),
+                _g_cell(g, "QUANTITY"), "" if g["uom"] is None else str(g["uom"]),
+                _g_cell(g, "S_QTY"), "" if g["suom"] is None else str(g["suom"]),
+                _pkg_cell(g), _g_cell(g, "GROSS_WEIGHT"), _g_cell(g, "NET_WEIGHT"),
+            ])
+        t = Table(rows, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), NAVY), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTSIZE", (0, 0), (-1, 0), 7.5), ("FONTSIZE", (0, 1), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, ZEBRA]),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (2, 0), (-1, -1), "RIGHT"), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(t)
+
     doc.build(story)
     buf.seek(0)
-    return buf.getvalue(), len(groups)
+    n_groups = sum(len(b["groups"]) for b in asns.values())
+    return buf.getvalue(), len(asns), n_groups
 
 
 # ---------- HU_ID labels (barcode + QR) ----------
@@ -358,8 +399,84 @@ def build_label_records(ws, hu_col, detail_cols, limit):
 
 # ---------- UI ----------
 
-st.title("📦 ASN S_QTY Exploder")
-st.caption("S_QTY අගයෙන් line ගාන හදනවා · S_QTY 10 → line 10ක් · හැම line එකකම S_QTY = 1 · Exploded Excel + Summary PDF")
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
+:root{ --navy:#16324a; --navy-d:#0e2438; --amber:#f5a623; --ink:#1a2733; --muted:#5a6b7b; --line:#e3eaf0; }
+
+html, body, [class*="css"]{ font-family:'Inter',system-ui,sans-serif; }
+.stApp{ background:linear-gradient(180deg,#f7fafc 0%,#eef3f7 100%); }
+.block-container{ padding-top:1.4rem; animation:fadeUp .5s ease both; }
+
+@keyframes fadeUp{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
+@keyframes sheen{ 0%{background-position:0% 50%;} 100%{background-position:200% 50%;} }
+
+/* hero */
+.hero{ position:relative; overflow:hidden; border-radius:16px; padding:26px 28px;
+  background:linear-gradient(110deg,#0e2438,#16324a 60%,#1b3f5c 100%);
+  box-shadow:0 10px 30px -12px rgba(14,36,56,.55); color:#fff; }
+.hero::after{ content:""; position:absolute; top:0; left:0; right:0; height:3px;
+  background:linear-gradient(90deg,transparent,var(--amber),transparent);
+  background-size:200% 100%; animation:sheen 3.5s linear infinite; }
+.hero .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:.72rem; letter-spacing:.22em;
+  text-transform:uppercase; color:var(--amber); margin:0 0 6px; }
+.hero h1{ font-size:1.8rem; font-weight:700; margin:0; line-height:1.1; }
+.hero p{ margin:.5rem 0 0; color:#bcd0e2; font-size:.92rem; max-width:60ch; }
+.hero .pills{ margin-top:14px; display:flex; gap:8px; flex-wrap:wrap; }
+.hero .pill{ font-family:'JetBrains Mono',monospace; font-size:.7rem; letter-spacing:.04em;
+  background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.16);
+  padding:5px 10px; border-radius:999px; color:#dbe7f2; }
+
+/* section headers */
+h2, h3{ color:var(--navy)!important; font-weight:600!important; }
+
+/* metrics as cards */
+[data-testid="stMetric"]{ background:#fff; border:1px solid var(--line); border-left:4px solid var(--amber);
+  border-radius:12px; padding:14px 16px; box-shadow:0 4px 14px -10px rgba(22,50,74,.4);
+  transition:transform .15s ease, box-shadow .15s ease; animation:fadeUp .5s ease both; }
+[data-testid="stMetric"]:hover{ transform:translateY(-2px); box-shadow:0 10px 22px -12px rgba(22,50,74,.5); }
+[data-testid="stMetricValue"]{ font-family:'JetBrains Mono',monospace; color:var(--navy); }
+
+/* buttons */
+.stButton>button, [data-testid="stDownloadButton"]>button{
+  border-radius:10px; font-weight:600; border:1px solid var(--line);
+  transition:transform .12s ease, box-shadow .18s ease, background .2s ease; }
+.stButton>button:hover, [data-testid="stDownloadButton"]>button:hover{
+  transform:translateY(-2px); box-shadow:0 8px 18px -10px rgba(22,50,74,.55); }
+button[kind="primary"]{ background:linear-gradient(120deg,#16324a,#205074)!important; border:none!important; }
+button[kind="primary"]:hover{ background:linear-gradient(120deg,#1b3f5c,#27618d)!important; }
+[data-testid="stDownloadButton"]>button{ background:#fff; color:var(--navy); }
+
+/* file uploader */
+[data-testid="stFileUploader"]{ background:#fff; border:1.5px dashed #c4d3e0; border-radius:14px;
+  padding:8px 12px; transition:border-color .2s ease, box-shadow .2s ease; }
+[data-testid="stFileUploader"]:hover{ border-color:var(--amber); box-shadow:0 6px 18px -12px rgba(245,166,35,.5); }
+
+/* code-ish captions */
+.stCaption, [data-testid="stCaptionContainer"]{ color:var(--muted)!important; }
+
+@media (prefers-reduced-motion: reduce){
+  *{ animation:none!important; transition:none!important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="hero">
+  <p class="eyebrow">Warehouse · ASN Toolkit</p>
+  <h1>ASN S_QTY Exploder</h1>
+  <p>S_QTY අගයෙන් line ගාන හදනවා — S_QTY 10 → line 10ක්, හැම line එකකම S_QTY = 1.
+     Exploded Excel · ASN Summary PDF · HU_ID barcode + QR labels.</p>
+  <div class="pills">
+    <span class="pill">EXPLODE</span>
+    <span class="pill">HU_ID GEN</span>
+    <span class="pill">SUMMARY PDF</span>
+    <span class="pill">BARCODE + QR</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+st.write("")
 
 uploaded = st.file_uploader("Excel file එකක් upload කරන්න (.xlsx)", type=["xlsx"])
 if uploaded is None:
@@ -497,10 +614,10 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
 
     base = uploaded.name.rsplit(".", 1)[0]
 
-    pdf_bytes, ngrp, pdf_err = None, 0, None
+    pdf_bytes, n_asn, ngrp, pdf_err = None, 0, 0, None
     if make_pdf:
         try:
-            pdf_bytes, ngrp = make_summary_pdf(ws_target, sum_cols)
+            pdf_bytes, n_asn, ngrp = make_summary_pdf(ws_target, sum_cols)
         except Exception as e:
             pdf_err = str(e)
 
@@ -522,7 +639,7 @@ if st.button("🚀 Explode & Generate", type="primary", use_container_width=True
     # download buttons click එකකින් rerun වුණත් නැති නොවෙන්න session_state එකේ තියාගන්නවා
     st.session_state["result"] = {
         "base": base, "n_src": n_src, "n_out": n_out, "sheet": target_sheet,
-        "excel": out_buf.getvalue(), "pdf": pdf_bytes, "ngrp": ngrp, "pdf_err": pdf_err,
+        "excel": out_buf.getvalue(), "pdf": pdf_bytes, "ngrp": ngrp, "n_asn": n_asn, "pdf_err": pdf_err,
         "labels": labels_bytes, "n_labels": n_labels, "labels_trunc": labels_trunc, "labels_err": labels_err,
         "headers": headers, "preview": preview,
     }
@@ -540,7 +657,7 @@ if res:
                            use_container_width=True, key="dl_excel")
     with d2:
         if res["pdf"] is not None:
-            st.download_button(f"⬇️ Summary PDF ({res['ngrp']} items)", data=res["pdf"],
+            st.download_button(f"⬇️ Summary PDF ({res.get('n_asn', 0)} ASN)", data=res["pdf"],
                                file_name=f"{res['base']}_SUMMARY.pdf", mime="application/pdf",
                                use_container_width=True, key="dl_pdf")
         elif res["pdf_err"]:
